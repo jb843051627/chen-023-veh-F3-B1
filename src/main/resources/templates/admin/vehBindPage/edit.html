@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <th:block th:include="include :: header('车辆联网清单页改口/换层')"/>
+</head>
+<body>
+<form class="layui-form" id="bind-form" th:object="${form}">
+    <input type="hidden" name="id" th:value="*{id}">
+    <div class="mainBox">
+        <div class="main-container">
+            <div class="layui-form-item">
+                <label class="layui-form-label">清单代号</label>
+                <div class="layui-input-inline" style="width:200px;">
+                    <!-- 系统排号，只照旧，不许改 -->
+                    <input type="text" class="layui-input layui-disabled" th:value="${page?.billNo}" disabled>
+                </div>
+                <label class="layui-form-label" style="width:100px;">随页签认码</label>
+                <div class="layui-input-inline" style="width:200px;">
+                    <input type="text" class="layui-input layui-disabled" th:value="${page?.signNo}" disabled>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">车辆营运代号</label>
+                <div class="layui-input-inline" style="width:200px;">
+                    <input type="text" class="layui-input layui-disabled" th:value="*{vehCode}" disabled>
+                </div>
+                <label class="layui-form-label" style="width:100px;">还差几项</label>
+                <div class="layui-input-inline" style="width:200px;">
+                    <!-- 轧出来的格只回显：应联-已联，提交时由系统重轧覆盖 -->
+                    <input type="text" class="layui-input layui-disabled"
+                           th:value="${page?.lackCount}" disabled>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">所属业户</label>
+                <div class="layui-input-block">
+                    <input type="text" class="layui-input layui-disabled"
+                           th:value="${page?.siteName} ?: ''" disabled>
+                    <!-- 业户不许换：只照旧，不随表单递改值 -->
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">页所在层级</label>
+                <div class="layui-input-block">
+                    <select name="nodeNo">
+                        <option value="0" th:selected="*{nodeNo} == 0">县域（属地写到县为止）</option>
+                        <option value="1" th:selected="*{nodeNo} == 1">市域</option>
+                        <option value="2" th:selected="*{nodeNo} == 2">省域</option>
+                    </select>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">应联项数</label>
+                <div class="layui-input-inline" style="width:140px;">
+                    <input type="number" min="0" step="1" name="shouldCountRaw" th:value="*{shouldCountRaw}"
+                           autocomplete="off" class="layui-input">
+                </div>
+                <label class="layui-form-label" style="width:90px;">已联项数</label>
+                <div class="layui-input-inline" style="width:140px;">
+                    <input type="number" min="0" step="1" name="doneCountRaw" th:value="*{doneCountRaw}"
+                           autocomplete="off" class="layui-input">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">联网要件</label>
+                <div class="layui-input-block">
+                    <textarea name="content" class="layui-textarea" th:text="*{content}"></textarea>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">备注</label>
+                <div class="layui-input-block">
+                    <input type="text" name="remark" th:value="*{remark}" autocomplete="off" class="layui-input">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="bottom">
+        <div class="button-container">
+            <button type="submit" class="layui-btn layui-btn-normal layui-btn-sm" lay-submit lay-filter="bind-update">
+                <i class="layui-icon layui-icon-ok"></i> 提交并重轧
+            </button>
+            <button type="reset" class="layui-btn layui-btn-primary layui-btn-sm">
+                <i class="layui-icon layui-icon-refresh"></i> 重置
+            </button>
+        </div>
+    </div>
+</form>
+<th:block th:include="include :: footer"/>
+<script>
+    layui.use(['form', 'jquery', 'layer'], function () {
+        let form = layui.form;
+        let $ = layui.jquery;
+        let layer = parent.layer === undefined ? layui.layer : parent.layer;
+        let MODULE_PATH = rootPath + "/VehBindPageController";
+
+        let FIELD_LABELS = {
+            id: '页',
+            nodeNo: '页所在层级',
+            shouldCount: '应联项数',
+            shouldCountRaw: '应联项数',
+            doneCount: '已联项数',
+            doneCountRaw: '已联项数'
+        };
+
+        form.on('submit(bind-update)', function (data) {
+            let loading = layer.load();
+            $.ajax({
+                url: MODULE_PATH + '/edit',
+                data: data.field,
+                dataType: 'json',
+                type: 'post',
+                success: function (result) {
+                    layer.close(loading);
+                    if (result.code === 200) {
+                        layer.msg(result.msg || '重轧办结', {icon: 1, time: 1000}, function () {
+                            parent.layui.table.reload('bind-table');
+                            let idx = parent.layer.getFrameIndex(window.name);
+                            parent.layer.close(idx);
+                        });
+                    } else {
+                        let label = result.field ? (FIELD_LABELS[result.field] || result.field) : '';
+                        layer.alert((label ? '【' + label + '】' : '') + (result.msg || '这一页改不了'), {icon: 2, title: '退回'});
+                    }
+                },
+                error: function () {
+                    layer.close(loading);
+                    layer.msg('网络异常', {icon: 2});
+                }
+            });
+            return false;
+        });
+    });
+</script>
+</body>
+</html>

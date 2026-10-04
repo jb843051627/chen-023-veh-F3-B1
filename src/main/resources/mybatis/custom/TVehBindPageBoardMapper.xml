@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fc.v2.mapper.custom.TVehBindPageBoardMapper">
+
+    <!--
+      开屏只此一条 SELECT：页头三栏以窗口计数随名单一起回来，
+      挂页车数、已联齐、缺项与一张一张点出来的页出自同一回点算，谁也绕不开。
+      分页在服务层按这同一份名单切，不在库里另起第二条口径。
+    -->
+    <select id="selectBoardPage" parameterType="com.fc.v2.model.custom.VehBindQuery"
+            resultType="com.fc.v2.model.auto.TVehBindPage">
+        SELECT
+            p.id,
+            p.bill_no,
+            p.sign_no,
+            p.veh_code,
+            p.node_no,
+            p.site_id,
+            p.site_no,
+            p.should_count,
+            p.done_count,
+            p.lack_count,
+            p.content,
+            p.status,
+            p.del_flag,
+            p.create_by,
+            p.create_time,
+            p.update_by,
+            p.update_time,
+            p.remark,
+            e.site_name,
+            e.site_type,
+            e.road_name,
+            COUNT(*) OVER()                  AS board_total,
+            SUM(CASE WHEN p.status = 1 THEN 1 ELSE 0 END) OVER() AS board_linked,
+            SUM(CASE WHEN p.status = 2 THEN 1 ELSE 0 END) OVER() AS board_lack
+        FROM t_veh_bind_page p
+        <!-- LEFT JOIN：名录行即便被留痕删除，它名下已在场的页也不许从屏上消失 -->
+        LEFT JOIN t_veh_ent e ON e.id = p.site_id AND e.del_flag = 0
+        <where>
+            p.del_flag = 0
+            AND p.node_no = #{nodeNo}
+            <if test="roadPrefix != null and roadPrefix != ''">
+                AND e.road_name LIKE CONCAT(#{roadPrefix}, '%')
+            </if>
+            <if test="billNo != null and billNo != ''">
+                AND p.bill_no LIKE CONCAT(#{billNo}, '%')
+            </if>
+            <if test="vehCode != null and vehCode != ''">
+                AND p.veh_code LIKE CONCAT(#{vehCode}, '%')
+            </if>
+            <if test="siteType != null and siteType != ''">
+                AND e.site_type LIKE CONCAT(#{siteType}, '%')
+            </if>
+        </where>
+        ORDER BY p.id DESC
+    </select>
+
+</mapper>

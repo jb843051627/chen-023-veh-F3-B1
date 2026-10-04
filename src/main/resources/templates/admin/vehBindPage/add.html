@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <th:block th:include="include :: header('车辆联网清单页立页')"/>
+</head>
+<body>
+<form class="layui-form" id="bind-form">
+    <div class="mainBox">
+        <div class="main-container">
+            <div class="layui-form-item">
+                <label class="layui-form-label">车辆营运代号</label>
+                <div class="layui-input-block">
+                    <input type="text" name="vehCode" autocomplete="off" placeholder="被对上的营运车辆代号" class="layui-input">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">所属业户</label>
+                <div class="layui-input-block">
+                    <select name="siteId" lay-search="">
+                        <option value="">先认总名录再立页</option>
+                        <option th:each="e : ${roster}"
+                                th:value="${e.id}"
+                                th:data-no="${e.siteNo}"
+                                th:text="${e.siteName} + '（' + ${e.siteType} + '）'"></option>
+                    </select>
+                    <!-- 业户代号随名录带出，只供照名录核，不由人另填 -->
+                    <input type="hidden" name="siteNo" id="siteNo" value="">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">页所在层级</label>
+                <div class="layui-input-block">
+                    <select name="nodeNo">
+                        <option value="0">县域（属地写到县为止）</option>
+                        <option value="1">市域</option>
+                        <option value="2">省域</option>
+                    </select>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">应联项数</label>
+                <div class="layui-input-inline" style="width:140px;">
+                    <input type="number" min="0" step="1" name="shouldCountRaw" autocomplete="off" placeholder="整数，空/零头退回" class="layui-input">
+                </div>
+                <label class="layui-form-label" style="width:90px;">已联项数</label>
+                <div class="layui-input-inline" style="width:140px;">
+                    <input type="number" min="0" step="1" name="doneCountRaw" autocomplete="off" placeholder="不得冒过应联" class="layui-input">
+                </div>
+            </div>
+            <!-- 清单代号、随页签认码由系统排号；还差几项由系统轧出——此页不摆这三个录入框 -->
+            <div class="layui-form-item">
+                <label class="layui-form-label">联网要件</label>
+                <div class="layui-input-block">
+                    <textarea name="content" placeholder="随页交来的联网要件" class="layui-textarea"></textarea>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">备注</label>
+                <div class="layui-input-block">
+                    <input type="text" name="remark" autocomplete="off" class="layui-input">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="bottom">
+        <div class="button-container">
+            <button type="submit" class="layui-btn layui-btn-normal layui-btn-sm" lay-submit lay-filter="bind-save">
+                <i class="layui-icon layui-icon-ok"></i> 提交
+            </button>
+            <button type="reset" class="layui-btn layui-btn-primary layui-btn-sm">
+                <i class="layui-icon layui-icon-refresh"></i> 重置
+            </button>
+        </div>
+    </div>
+</form>
+<th:block th:include="include :: footer"/>
+<script th:inline="javascript">
+    layui.use(['form', 'jquery', 'layer'], function () {
+        let form = layui.form;
+        let $ = layui.jquery;
+        let layer = parent.layer === undefined ? layui.layer : parent.layer;
+        let MODULE_PATH = rootPath + "/VehBindPageController";
+        // bring=1：同一张表单走"从当月核收带出"那条同义路子，界面上不出现第二种样子
+        let BRING = [[${bring}]];
+
+        // 退回时点明毛病出在哪一格：field → 中文格名
+        let FIELD_LABELS = {
+            vehCode: '车辆营运代号',
+            siteId: '所属业户',
+            siteNo: '业户代号',
+            nodeNo: '页所在层级',
+            shouldCount: '应联项数',
+            shouldCountRaw: '应联项数',
+            doneCount: '已联项数',
+            doneCountRaw: '已联项数',
+            form: '整页'
+        };
+
+        form.on('select', function (data) {
+            if (data.name === 'siteId') {
+                $('#siteNo').val($(data.elem).find('option:selected').attr('data-no') || '');
+            }
+        });
+
+        form.on('submit(bind-save)', function (data) {
+            let loading = layer.load();
+            $.ajax({
+                url: MODULE_PATH + (BRING ? '/bringFromCheck' : '/add'),
+                data: data.field,
+                dataType: 'json',
+                type: 'post',
+                success: function (result) {
+                    layer.close(loading);
+                    if (result.code === 200) {
+                        layer.msg(result.msg || '落页办结', {icon: 1, time: 1000}, function () {
+                            parent.layui.table.reload('bind-table');
+                            let idx = parent.layer.getFrameIndex(window.name);
+                            parent.layer.close(idx);
+                        });
+                    } else {
+                        // 光回"数不对劲"不算——原话之外再点明格子
+                        let label = result.field ? (FIELD_LABELS[result.field] || result.field) : '';
+                        layer.alert((label ? '【' + label + '】' : '') + (result.msg || '这一页落不进库'), {icon: 2, title: '退回'});
+                    }
+                },
+                error: function () {
+                    layer.close(loading);
+                    layer.msg('网络异常', {icon: 2});
+                }
+            });
+            return false;
+        });
+    });
+</script>
+</body>
+</html>

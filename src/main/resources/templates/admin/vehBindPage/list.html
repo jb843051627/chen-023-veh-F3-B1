@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.pollix.at/thymeleaf/shiro">
+<head>
+    <th:block th:include="include :: header('车辆联网清单页')"/>
+</head>
+<body class="pear-container">
+<div class="layui-card">
+    <div class="layui-card-body">
+        <!-- 页头三栏：挂页车数、已联齐、缺项——只照业务层同一回点算写回的结果摆 -->
+        <div class="layui-row layui-col-space15" style="margin-bottom: 10px;">
+            <div class="layui-col-md4">
+                <div class="layui-card"><div class="layui-card-body">
+                    <div style="color:#888;">挂页的车数</div>
+                    <div style="font-size:28px;font-weight:600;" id="bind-total">0</div>
+                </div></div>
+            </div>
+            <div class="layui-col-md4">
+                <div class="layui-card"><div class="layui-card-body">
+                    <div style="color:#888;">已联齐</div>
+                    <div style="font-size:28px;font-weight:600;color:#16b777;" id="bind-linked">0</div>
+                </div></div>
+            </div>
+            <div class="layui-col-md4">
+                <div class="layui-card"><div class="layui-card-body">
+                    <div style="color:#888;">缺项</div>
+                    <div style="font-size:28px;font-weight:600;color:#ff5722;" id="bind-lack">0</div>
+                </div></div>
+            </div>
+        </div>
+        <form class="layui-form" action="" id="bind-query-form">
+            <div class="layui-form-item">
+                <label class="layui-form-label">所在层</label>
+                <div class="layui-input-inline" style="width:110px;">
+                    <select name="nodeNo" lay-filter="nodeNo">
+                        <option value="0">县域</option>
+                        <option value="1">市域</option>
+                        <option value="2">省域</option>
+                    </select>
+                </div>
+                <label class="layui-form-label">属地前缀</label>
+                <div class="layui-input-inline" style="width:220px;">
+                    <input type="text" name="roadPrefix" placeholder="省—市—县，一直写到县" class="layui-input">
+                </div>
+                <label class="layui-form-label">清单代号</label>
+                <div class="layui-input-inline" style="width:150px;">
+                    <input type="text" name="billNo" placeholder="整段或开头几笔" class="layui-input">
+                </div>
+                <label class="layui-form-label">营运代号</label>
+                <div class="layui-input-inline" style="width:150px;">
+                    <input type="text" name="vehCode" placeholder="整段或开头几笔" class="layui-input">
+                </div>
+                <label class="layui-form-label">业户类别</label>
+                <div class="layui-input-inline" style="width:170px;">
+                    <input type="text" name="siteType" placeholder="道路旅客/危险货物/普通货运" class="layui-input">
+                </div>
+                <button class="pear-btn pear-btn-md pear-btn-primary" lay-submit lay-filter="bind-query">
+                    <i class="layui-icon layui-icon-search"></i> 查询
+                </button>
+                <button type="reset" class="pear-btn pear-btn-md">
+                    <i class="layui-icon layui-icon-refresh"></i> 重置
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+<div class="layui-card">
+    <div class="layui-card-body">
+        <table id="bind-table" lay-filter="bind-table"></table>
+    </div>
+</div>
+</body>
+
+<script type="text/html" id="bind-toolbar">
+    <button shiro:hasPermission="veh:vehBindPage:add" class="pear-btn pear-btn-primary pear-btn-md" lay-event="add">
+        <i class="layui-icon layui-icon-add-1"></i> 一车一张亲手立
+    </button>
+    <button shiro:hasPermission="veh:vehBindPage:add" class="pear-btn pear-btn-warming pear-btn-md" lay-event="bring">
+        <i class="layui-icon layui-icon-add-circle"></i> 从当月核收带出
+    </button>
+</script>
+
+<script type="text/html" id="bind-bar">
+    <button shiro:hasPermission="veh:vehBindPage:edit" class="pear-btn pear-btn-primary pear-btn-sm" lay-event="edit" title="改口/换层">
+        <i class="layui-icon layui-icon-edit"></i>
+    </button>
+    <button shiro:hasPermission="veh:vehBindPage:remove" class="pear-btn pear-btn-danger pear-btn-sm" lay-event="remove" title="留痕删除">
+        <i class="layui-icon layui-icon-delete"></i>
+    </button>
+</script>
+
+<script type="text/html" id="bind-status-tpl">
+    {{#  if(d.status === 0){ }}<span class="pear-btn pear-btn-sm pear-btn-sm pear-btn-warming" style="cursor:default;">新录</span>
+    {{#  } else if(d.status === 1){ }}<span style="color:#16b777;">已联齐</span>
+    {{#  } else if(d.status === 2){ }}<span style="color:#ff5722;">缺项</span>
+    {{#  } }}
+</script>
+
+<th:block th:include="include :: footer"/>
+<script>
+    layui.use(['table', 'form', 'jquery', 'layer'], function () {
+        let table = layui.table;
+        let form = layui.form;
+        let $ = layui.jquery;
+        let layer = layui.layer;
+
+        let MODULE_PATH = rootPath + "/VehBindPageController";
+        // 每屏几条由处里定，往下翻还有（条数取服务端配置，前端只递分页）
+        let queryFields = function () {
+            return $('#bind-query-form').serialize();
+        };
+
+        let cols = [[
+            {title: 'ID', field: 'id', align: 'center', hide: true},
+            {title: '清单代号', field: 'billNo', align: 'left', width: 190},
+            {title: '随页签认码', field: 'signNo', align: 'left', width: 190},
+            {title: '车辆营运代号', field: 'vehCode', align: 'left', width: 140},
+            {title: '所属业户', align: 'left', minWidth: 200, templet: function (d) {
+                return (d.siteName || '') + '<br><span style="color:#999;">' + (d.siteNo || '') + '</span>';
+            }},
+            {title: '业户类别', field: 'siteType', align: 'left', width: 140},
+            {title: '属地', field: 'roadName', align: 'left', width: 210},
+            {title: '层级', field: 'nodeNo', align: 'center', width: 70, templet: function (d) {
+                return d.nodeNo === 0 ? '县域' : (d.nodeNo === 1 ? '市域' : (d.nodeNo === 2 ? '省域' : ''));
+            }},
+            {title: '应联', field: 'shouldCount', align: 'center', width: 70},
+            {title: '已联', field: 'doneCount', align: 'center', width: 70},
+            // 还差几项：只回显，页上从来没有这一格的录入框
+            {title: '还差', field: 'lackCount', align: 'center', width: 70, style: 'font-weight:600;'},
+            {title: '进展', field: 'status', align: 'center', width: 90, templet: '#bind-status-tpl'},
+            {title: '操作', toolbar: '#bind-bar', align: 'center', width: 120}
+        ]];
+
+        table.render({
+            elem: '#bind-table',
+            url: MODULE_PATH + '/list',
+            page: true,
+            method: 'get',
+            cols: cols,
+            skin: 'line',
+            toolbar: '#bind-toolbar',
+            where: {nodeNo: '0', roadPrefix: ''},
+            defaultToolbar: [{layEvent: 'refresh', icon: 'layui-icon-refresh'}, 'filter', 'print', 'exports'],
+            parseData: function (res) {
+                // 页头三栏与名单同一次算成：本层没立过页时三栏照零摆；
+                // 没报层级/属地被退回的，原话点出，名单空着，不借邻处一行
+                $('#bind-total').text(res.bindTotal || 0);
+                $('#bind-linked').text(res.bindLinked || 0);
+                $('#bind-lack').text(res.bindLack || 0);
+                if (res.code !== 0) {
+                    layer.msg(res.msg || '这一屏开不了', {icon: 2});
+                    return {code: 0, msg: res.msg, count: 0, data: []};
+                }
+                return {
+                    code: res.code,
+                    msg: res.msg,
+                    count: res.count,
+                    data: res.data
+                };
+            }
+        });
+
+        let currentRoad = function () {
+            return $('#bind-query-form [name="roadPrefix"]').val() || '';
+        };
+
+        form.on('submit(bind-query)', function (data) {
+            table.reload('bind-table', {where: data.field, page: {curr: 1}});
+            return false;
+        });
+
+        table.on('toolbar(bind-table)', function (obj) {
+            if (obj.event === 'add') {
+                layer.open({
+                    type: 2, title: '一车一张亲手立', shade: 0.1, area: ['620px', '620px'],
+                    content: MODULE_PATH + '/add?roadPrefix=' + encodeURIComponent(currentRoad())
+                });
+            } else if (obj.event === 'bring') {
+                // 同一张表单、同一种样子，只是落页走"从当月核收带出"那条同义路子
+                layer.open({
+                    type: 2, title: '从当月核收带出立页', shade: 0.1, area: ['620px', '620px'],
+                    content: MODULE_PATH + '/add?bring=1&roadPrefix=' + encodeURIComponent(currentRoad())
+                });
+            } else if (obj.event === 'refresh') {
+                table.reload('bind-table');
+            }
+        });
+
+        table.on('tool(bind-table)', function (obj) {
+            if (obj.event === 'edit') {
+                layer.open({
+                    type: 2, title: '改口/换层（重轧一遍）', shade: 0.1, area: ['620px', '620px'],
+                    content: MODULE_PATH + '/edit/' + obj.data.id + '?roadPrefix=' + encodeURIComponent(currentRoad())
+                });
+            } else if (obj.event === 'remove') {
+                layer.confirm('确定留痕删除这张页？在场的页不会被抹掉，只打删除标记。', {icon: 3, title: '提示'}, function (index) {
+                    layer.close(index);
+                    let loading = layer.load();
+                    $.ajax({
+                        url: MODULE_PATH + '/remove?ids=' + obj.data.id,
+                        dataType: 'json', type: 'delete',
+                        success: function (result) {
+                            layer.close(loading);
+                            if (result.code === 200) {
+                                layer.msg(result.msg, {icon: 1, time: 1000}, function () {
+                                    table.reload('bind-table');
+                                });
+                            } else {
+                                layer.msg(result.msg, {icon: 2});
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    });
+</script>
+</html>
