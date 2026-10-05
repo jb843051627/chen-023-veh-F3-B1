@@ -150,6 +150,29 @@ CREATE TABLE IF NOT EXISTS t_veh_run_line (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运行界次判定线';
 
+CREATE TABLE IF NOT EXISTS t_veh_run_line_verdict (
+  id bigint NOT NULL COMMENT '主键',
+  measure_kind varchar(32) DEFAULT NULL COMMENT '所量类别 speed车速 duration时长',
+  raw_value decimal(14,4) DEFAULT NULL COMMENT '车上报回来的原值（车速m/s、时长分钟）',
+  converted_value decimal(12,3) DEFAULT NULL COMMENT '折到界册那一头之后的数（取数与比数同一把舍法）',
+  ask_at datetime DEFAULT NULL COMMENT '问话的那一刻（补判旧账传旧账自己的那一刻）',
+  rule_code varchar(64) DEFAULT NULL COMMENT '说话的界次代号（无可用界/超量程留空）',
+  rule_name varchar(128) DEFAULT NULL COMMENT '说话的界名（留痕当时快照）',
+  eff_start datetime DEFAULT NULL COMMENT '说话界的起用那一日（快照）',
+  th1_max decimal(12,3) DEFAULT NULL COMMENT '起算数值快照（裁决当时，防日后改界）',
+  th2_max decimal(12,3) DEFAULT NULL COMMENT '够线数值快照',
+  th3_max decimal(12,3) DEFAULT NULL COMMENT '封顶数值快照',
+  unit_kind varchar(32) DEFAULT NULL COMMENT '界册单位快照',
+  priority int DEFAULT NULL COMMENT '交班次序快照',
+  level int DEFAULT NULL COMMENT '层序 1提示 2严管 3立案；无可用界/未到起算/超量程为空',
+  level_text varchar(32) DEFAULT NULL COMMENT '结论栏（提示/严管/立案/未到起算/无可用界/超出量程）',
+  archived_at datetime DEFAULT NULL COMMENT '判完归档在册的时刻',
+  del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
+  PRIMARY KEY (id),
+  KEY idx_rlv_ask (measure_kind, ask_at),
+  KEY idx_rlv_rule (rule_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运行界次裁决留痕（判完即归档，追溯以此份为准）';
+
 -- 初始档案数据：t_veh_ent 预置两条名录，id=0 在册、id=1 已销户，
 -- 供界次判定与联网清单挂接时按在册口径取用。
 INSERT IGNORE INTO t_veh_ent (id, site_no, site_name, site_type, road_name, status, del_flag, create_by, create_time)

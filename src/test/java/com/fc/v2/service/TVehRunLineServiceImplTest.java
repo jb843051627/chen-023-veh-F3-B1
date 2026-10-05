@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -16,12 +18,15 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.fc.v2.mapper.auto.TVehRunLineMapper;
+import com.fc.v2.mapper.auto.TVehRunLineVerdictRecordMapper;
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunLineVerdictRecord;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 import com.fc.v2.service.impl.TVehRunLineServiceImpl;
@@ -37,6 +42,9 @@ public class TVehRunLineServiceImplTest {
 
     @Mock
     private TVehRunLineMapper vehRunLineMapper;
+
+    @Mock
+    private TVehRunLineVerdictRecordMapper verdictRecordMapper;
 
     @InjectMocks
     private TVehRunLineServiceImpl service;
@@ -356,5 +364,110 @@ public class TVehRunLineServiceImplTest {
         assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, null, day("2026-10-04")));
         assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("25"), null));
         assertNull(service.verdict("bogus", new BigDecimal("25"), day("2026-10-04")));
+        // 缺参连档都不判，也不许留半份归档
+        verify(verdictRecordMapper, never()).insert(any(TVehRunLineVerdictRecord.class));
+    }
+
+    // ---- 量程：越界值判出档位，给兜底结论，不许塞进立案层 ----
+
+    @Test
+    public void outOfRangeRawValueIsJudgedOutOfLevel() {
+        // 量程门在请界之前：越界连界册都不翻，直接判出档位
+        RunLineVerdict over = service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("100.001"),
+                day("2026-10-04"));
+        assertEquals(ITVehRunLineService.TEXT_OUT_OF_RANGE, over.getLevelText());
+        assertNull(over.getLevel());
+        assertNull(over.getRuleCode());
+        // 负值同样判出档位
+        RunLineVerdict neg = service.verdict(ITVehRunLineService.MEASURE_DURATION, new BigDecimal("-1"),
+                day("2026-10-04"));
+        assertEquals(ITVehRunLineService.TEXT_OUT_OF_RANGE, neg.getLevelText());
+    }
+
+    // ---- 判完即归档在册：说话界快照落册，日后改界也以这一份为准 ----
+
+    @Test
+    public void verdictArchivesSnapshotOfSpeakingRule() {
+        stubRegister(rule("S1", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 0));
+        service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("25"),
+                day("2026-10-04 09:00:00"));
+        ArgumentCaptor<TVehRunLineVerdictRecord> cap =
+                ArgumentCaptor.forClass(TVehRunLineVerdictRecord.class);
+        verify(verdictRecordMapper).insert(cap.capture());
+        TVehRunLineVerdictRecord rec = cap.getValue();
+        assertEquals("S1", rec.getRuleCode());
+        assertEquals(1, rec.getLevel().intValue());
+        assertEquals("提示", rec.getLevelText());
+        // 分界数照裁决那一刻快照，日后界册改了也不许拿新版重算
+        assertEquals(0, new BigDecimal("60").compareTo(rec.getTh1Max()));
+        assertEquals(0, new BigDecimal("100").compareTo(rec.getTh2Max()));
+        assertEquals(0, new BigDecimal("120").compareTo(rec.getTh3Max()));
+        assertEquals(0, new BigDecimal("90.000").compareTo(rec.getConvertedValue()));
+        assertEquals(0, new BigDecimal("25").compareTo(rec.getRawValue()));
+        assertEquals(day("2026-10-04 09:00:00"), rec.getAskAt());
+        assertNotNull(rec.getArchivedAt());
+    }
+
+    @Test
+    public void noRuleVerdictStillArchivesWithBlankRuleColumns() {
+        stubRegister();
+        RunLineVerdict v = service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("25"),
+                day("2026-10-04"));
+        assertEquals(ITVehRunLineService.TEXT_NO_RULE, v.getLevelText());
+        ArgumentCaptor<TVehRunLineVerdictRecord> cap =
+                ArgumentCaptor.forClass(TVehRunLineVerdictRecord.class);
+        verify(verdictRecordMapper).insert(cap.capture());
+        assertNull(cap.getValue().getRuleCode());
+        assertNull(cap.getValue().getLevel());
+    }
+
+    // ---- 新旧两路对压线与越界只许一个说法 ----
+
+    @Test
+    public void oldAndNewPathAgreeOnBoundaryAndRange() {
+        stubRegister(rule("D1", ITVehRunLineService.MEASURE_DURATION, "4", "8", "12",
+                "2020-01-01", null, 0, 0));
+        // 旧路收界册单位（小时）：压够线 8.000 → 严管(2)；旧口径"等于上限取高一档"会错判成提示(1)
+        assertEquals(2, service.evaluate("D1", new BigDecimal("8.000"), day("2026-10-04")));
+        // 压封顶 → 立案(3)，旧口径会落到 3 以上那档
+        assertEquals(3, service.evaluate("D1", new BigDecimal("12.000"), day("2026-10-04")));
+        // 差一点点没够着起算 → 0（不给层），与新路"未到起算"是同一处归层
+        assertEquals(0, service.evaluate("D1", new BigDecimal("3.999"), day("2026-10-04")));
+        // 越界值判出档位：旧路原先不看量程，1441 分钟折 24.017 小时会被塞进立案
+        assertEquals(0, service.evaluate("D1", new BigDecimal("24.017"), day("2026-10-04")));
+    }
+
+    @Test
+    public void oldPathUsesHistoricalWindowNotNewestRule() {
+        stubRegister(
+                rule("OLD", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                        "2024-01-01", "2025-01-01", 0, 0),
+                rule("NEW", ITVehRunLineService.MEASURE_SPEED, "10", "20", "30",
+                        "2026-01-01", null, 0, 0));
+        // 旧账那一刻旧界在位：90 落提示
+        assertEquals(1, service.evaluate("OLD", new BigDecimal("90"), day("2024-09-15")));
+        // 今年再问旧代号：旧界已交班，请不出，不许拿最新一条顶替
+        assertEquals(0, service.evaluate("OLD", new BigDecimal("90"), day("2026-10-04")));
+    }
+
+    @Test
+    public void oldAvailableListSharesEffectiveFilterAndSpeakOrder() {
+        stubRegister(
+                rule("OFF", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                        "2020-01-01", null, 0, 1),
+                rule("R10", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                        "2020-01-01", null, 2, 0),
+                rule("R2", ITVehRunLineService.MEASURE_SPEED, "10", "20", "30",
+                        "2020-01-01", null, 2, 0));
+        List<TVehRunLine> avail = service.listAvailable(day("2026-10-04"));
+        // 停用界不混进可用名单；说话序与裁决同一处排定
+        assertEquals(2, avail.size());
+        assertEquals("R2", avail.get(0).getRuleCode());
+        assertEquals(2, service.countAvailable(day("2026-10-04")));
+        // 90 km/h：头一条 R2 判立案；多规则旧路与裁决听同一条说话
+        assertEquals(3, service.evaluateTop(new BigDecimal("90"), day("2026-10-04")));
+        // 越界值在旧路同样判出档位
+        assertEquals(0, service.evaluateTop(new BigDecimal("360.001"), day("2026-10-04")));
     }
 }

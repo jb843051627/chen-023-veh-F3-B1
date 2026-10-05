@@ -13,7 +13,9 @@ import org.springframework.stereotype.Service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fc.v2.mapper.auto.TVehRunLineMapper;
+import com.fc.v2.mapper.auto.TVehRunLineVerdictRecordMapper;
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunLineVerdictRecord;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 import com.fc.v2.service.ITVehRunLineService;
@@ -22,10 +24,11 @@ import com.fc.v2.service.ITVehRunLineService;
  * 运行界次判定线 Service业务层处理。
  *
  * 界次归层四问只由本类 verdict 一处作答：折算口径、在位口径、说话次序、三层归层都在这里，
- * 屏上不许另摆第二套；在位名单（listEffective）与裁决请界走同一处筛选，两本账不许有。
+ * 屏上不许另摆第二套；在位名单（listEffective/listAvailable）与裁决请界走同一处筛选，两本账不许有。
  *
- * 旧办法（evaluate/evaluateTop/listAvailable/usable/countAvailable）照原样摆着，
- * 这一回的新需求一律另起名目，不往旧办法身上挂新参数。
+ * 旧办法（evaluate/evaluateTop/listAvailable/usable/countAvailable）名目、参数表照原样摆着，
+ * 但判档不再另抄一套：请界、在位、量程、压线归层全转新走法那同一套口径，
+ * 旧路只留它自己的取数习惯（输入按界册单位直收、不折算），等号两边从此只许一个说法。
  *
  * @author fuce
  * @date 2026-09-14
@@ -41,6 +44,11 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
     private static final BigDecimal SPEED_FACTOR = new BigDecimal("3.6");
     /** 连续驾驶时长：分钟 ÷60 折成小时（只往界册那一头折） */
     private static final BigDecimal MINUTES_PER_HOUR = new BigDecimal("60");
+
+    /** 车速量程顶：车上报每秒多少米，过了这个数就是探头坏了，不许塞进档里（360 km/h） */
+    private static final BigDecimal SPEED_RAW_MAX = new BigDecimal("100");
+    /** 连续驾驶时长量程顶：一次连续驾驶最多收 1440 分钟（24 小时），再多按越界办 */
+    private static final BigDecimal DURATION_RAW_MAX = new BigDecimal("1440");
 
     /** 说话次序：交班次序降序；序相同再比界次代号，照排法落在末位（代号降序）的胜出 */
     private static final Comparator<TVehRunLine> SPEAK_ORDER = new Comparator<TVehRunLine>() {
@@ -60,8 +68,12 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
     @javax.annotation.Resource
     private TVehRunLineMapper vehRunLineMapper;
 
+    /** 判完即归档在册：每回裁决连同说话界的分界数快照落这一册，追溯只认归档的这一份 */
+    @javax.annotation.Resource
+    private TVehRunLineVerdictRecordMapper verdictRecordMapper;
+
     // ------------------------------------------------------------------
-    // 旧办法（凭界次代号取值）：照原样摆着，不挂新参数、不改口径
+    // 旧办法（名目照旧）：请界、在位、量程、归层全转同一套口径，不再各判各的
     // ------------------------------------------------------------------
 
     @Override
@@ -74,8 +86,26 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (ruleCode == null || ruleCode.trim().isEmpty() || input == null || at == null) {
             return 0;
         }
-        TVehRunLine rule = findRule(ruleCode, at);
-        return levelOf(rule, input);
+        // 请界不再只挑"最新一条"：补判旧账传旧账那一刻，就只请那一刻在位的那条，
+        // 已停用、已交班、分界数站不住的同新走法一样请不出
+        List<TVehRunLine> sameCode = selectRegister();
+        List<TVehRunLine> effective = new ArrayList<TVehRunLine>();
+        for (TVehRunLine r : sameCode) {
+            if (ruleCode.equals(r.getRuleCode()) && isEffective(r, null, at)) {
+                effective.add(r);
+            }
+        }
+        if (effective.isEmpty()) {
+            return 0;
+        }
+        effective.sort(SPEAK_ORDER);
+        TVehRunLine speaker = effective.get(0);
+        // 旧路输入已按界册单位收，不再折算；量程与压线归层仍走同一套
+        if (!inRegisterRange(speaker.getMeasureKind(), input)) {
+            return 0;
+        }
+        Integer level = grade(speaker, input);
+        return level == null ? 0 : level.intValue();
     }
 
     @Override
@@ -83,15 +113,18 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (input == null || at == null) {
             return 0;
         }
-        if (input.compareTo(BigDecimal.ZERO) < 0
-                || input.compareTo(new BigDecimal("100")) > 0) {
-            return 0;
-        }
+        // 与裁决请界同出一处：停用/交班/未起用/站不住的一律不在名单上，次序也照说话序排定，
+        // 不许不排序就捞头一条（同优先级时两次给不同档位就这么来的）
         List<TVehRunLine> avail = listAvailable(at);
         if (avail.isEmpty()) {
             return 0;
         }
-        return levelOf(avail.get(0), input);
+        TVehRunLine speaker = avail.get(0);
+        if (!inRegisterRange(speaker.getMeasureKind(), input)) {
+            return 0;
+        }
+        Integer level = grade(speaker, input);
+        return level == null ? 0 : level.intValue();
     }
 
     @Override
@@ -100,7 +133,8 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
             return false;
         }
         TVehRunLine r = this.vehRunLineMapper.selectById(id);
-        return r != null;
+        // 与在位名单同一处筛选：停用、交班、未起用、分界数站不住的都不算可用
+        return r != null && isEffective(r, null, at);
     }
 
     @Override
@@ -108,48 +142,23 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (at == null) {
             return 0;
         }
-        return this.vehRunLineMapper
-                .selectList(new QueryWrapper<TVehRunLine>().eq("del_flag", 0)).size();
+        return listAvailable(at).size();
     }
 
-    /** 旧口径：只排除留痕删除，不做生效窗口（新走法不要用它） */
+    /** 旧名目：口径已并到新走法同一处（只排除留痕删除那套旧说法作废，停用界不许再混进来） */
     @Override
     public List<TVehRunLine> listAvailable(Date at) {
+        List<TVehRunLine> available = new ArrayList<TVehRunLine>();
         if (at == null) {
-            return new ArrayList<TVehRunLine>();
+            return available;
         }
-        return this.vehRunLineMapper.selectList(new QueryWrapper<TVehRunLine>().eq("del_flag", 0));
-    }
-
-    private TVehRunLine findRule(String ruleCode, Date at) {
-        List<TVehRunLine> hit = this.vehRunLineMapper.selectList(new QueryWrapper<TVehRunLine>()
-                .eq("del_flag", 0).eq("rule_code", ruleCode));
-        TVehRunLine newest = null;
-        for (TVehRunLine r : hit) {
-            if (newest == null || r.getEffEnd() == null) {
-                newest = r;
-            } else if (newest.getEffEnd() != null && r.getEffEnd().after(newest.getEffEnd())) {
-                newest = r;
+        for (TVehRunLine r : selectRegister()) {
+            if (isEffective(r, null, at)) {
+                available.add(r);
             }
         }
-        return newest;
-    }
-
-    /** 旧分档：等于上限取高一档（旧口径，新走法不走这里） */
-    private int levelOf(TVehRunLine rule, BigDecimal input) {
-        if (rule == null) {
-            return 0;
-        }
-        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) <= 0) {
-            return 1;
-        }
-        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) <= 0) {
-            return 2;
-        }
-        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) <= 0) {
-            return 3;
-        }
-        return 4;
+        available.sort(SPEAK_ORDER);
+        return available;
     }
 
     // ------------------------------------------------------------------
@@ -164,30 +173,36 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         // 1) 取数：只往界册那一头折，取数一处、比数一处，同一把舍法
         BigDecimal converted = convertToRegister(measureKind, rawValue);
 
+        // 量程先过：越界值（探头念飞了那种）判出档位，给兜底结论，不许塞进立案层充数
+        if (!inRawRange(measureKind, rawValue)) {
+            RunLineVerdict out = new RunLineVerdict(TEXT_OUT_OF_RANGE, null, null, null, converted);
+            archive(measureKind, rawValue, converted, at, null, out);
+            return out;
+        }
+
         // 2)+3) 请界与说话：在位名单与屏上同出一处，排定了头一个就是说话的
         List<TVehRunLine> effective = listEffective(measureKind, at);
         if (effective.isEmpty()) {
             // 四条界一条都够不上：不给层，代号与起用日两栏一并留空，不许抄旁边那条
-            return new RunLineVerdict(TEXT_NO_RULE, null, null, null, converted);
+            RunLineVerdict noRule = new RunLineVerdict(TEXT_NO_RULE, null, null, null, converted);
+            archive(measureKind, rawValue, converted, at, null, noRule);
+            return noRule;
         }
         TVehRunLine speaker = effective.get(0);
 
         // 4) 归层只有一套说法，压线归本层：
-        //    [起算,够线)提示、[够线,封顶)严管、[封顶及以上)立案
-        if (converted.compareTo(speaker.getTh1Max()) < 0) {
-            return new RunLineVerdict(TEXT_BELOW_START, null,
+        //    [起算,够线)提示、[够线,封顶)严管、[封顶及以上)立案；没够着起算的不给层
+        Integer level = grade(speaker, converted);
+        RunLineVerdict result;
+        if (level == null) {
+            result = new RunLineVerdict(TEXT_BELOW_START, null,
+                    speaker.getRuleCode(), speaker.getEffStart(), converted);
+        } else {
+            result = new RunLineVerdict(levelName(level.intValue()), level,
                     speaker.getRuleCode(), speaker.getEffStart(), converted);
         }
-        if (converted.compareTo(speaker.getTh2Max()) < 0) {
-            return new RunLineVerdict(levelName(LEVEL_TIP), LEVEL_TIP,
-                    speaker.getRuleCode(), speaker.getEffStart(), converted);
-        }
-        if (converted.compareTo(speaker.getTh3Max()) < 0) {
-            return new RunLineVerdict(levelName(LEVEL_STRICT), LEVEL_STRICT,
-                    speaker.getRuleCode(), speaker.getEffStart(), converted);
-        }
-        return new RunLineVerdict(levelName(LEVEL_CASE), LEVEL_CASE,
-                speaker.getRuleCode(), speaker.getEffStart(), converted);
+        archive(measureKind, rawValue, converted, at, speaker, result);
+        return result;
     }
 
     @Override
@@ -196,21 +211,8 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (!isKnownMeasure(measureKind) || at == null) {
             return effective;
         }
-        List<TVehRunLine> all = this.vehRunLineMapper.selectList(
-                new QueryWrapper<TVehRunLine>().eq("del_flag", 0));
-        for (TVehRunLine r : all) {
-            if (!measureKind.equals(r.getMeasureKind())) {
-                continue;
-            }
-            // 已停用的不参与现行比对：册里翻得着、屏上列得出，只是不许捞它去比数
-            if (r.getStatus() != null && r.getStatus() == 1) {
-                continue;
-            }
-            // 分界数缺一格、后一格没越过前头那格，这条界这条线就站不住，不参与
-            if (thresholdDefect(r) != null) {
-                continue;
-            }
-            if (inOffice(r, at)) {
+        for (TVehRunLine r : selectRegister()) {
+            if (isEffective(r, measureKind, at)) {
                 effective.add(r);
             }
         }
@@ -295,9 +297,56 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         return dangling;
     }
 
+    @Override
+    public List<TVehRunLineVerdictRecord> listVerdictArchive(String measureKind, Date from, Date to,
+                                                             String ruleCode) {
+        QueryWrapper<TVehRunLineVerdictRecord> wrapper =
+                new QueryWrapper<TVehRunLineVerdictRecord>().eq("del_flag", 0);
+        if (isKnownMeasure(measureKind)) {
+            wrapper.eq("measure_kind", measureKind);
+        }
+        if (from != null) {
+            wrapper.ge("ask_at", from);
+        }
+        if (to != null) {
+            wrapper.le("ask_at", to);
+        }
+        if (ruleCode != null && !ruleCode.trim().isEmpty()) {
+            wrapper.eq("rule_code", ruleCode.trim());
+        }
+        // 追溯翻的是归档在册那一份：按问话时刻倒序，同刻再按归档先后
+        wrapper.orderByDesc("ask_at").orderByDesc("id");
+        return this.verdictRecordMapper.selectList(wrapper);
+    }
+
     // ------------------------------------------------------------------
     // 内里那一套走法（私有，外面摸不着，也不许另抄一份）
     // ------------------------------------------------------------------
+
+    /** 界册在册行（只排除留痕删除），各路口径都从这一册子上筛，不许多查一遍 */
+    private List<TVehRunLine> selectRegister() {
+        return this.vehRunLineMapper.selectList(new QueryWrapper<TVehRunLine>().eq("del_flag", 0));
+    }
+
+    /**
+     * 在位口径只此一处，裁决请界、屏上名单、旧办法可用性、屏挂核对全走它：
+     * 所量类别对得上（传 null 不分类别）、未停用、分界数站得住、起用含当日/交班不含当日。
+     * 交班栏空着的存量手抄界认作一直在位——存量兼容也只许这一种说法。
+     */
+    private boolean isEffective(TVehRunLine r, String measureKind, Date at) {
+        if (measureKind != null && !measureKind.equals(r.getMeasureKind())) {
+            return false;
+        }
+        // 已停用的不参与现行比对：册里翻得着、屏上列得出，只是不许捞它去比数
+        if (r.getStatus() != null && r.getStatus() == 1) {
+            return false;
+        }
+        // 分界数缺一格、后一格没越过前头那格，这条界这条线就站不住，不参与
+        if (thresholdDefect(r) != null) {
+            return false;
+        }
+        return inOffice(r, at);
+    }
 
     private boolean isKnownMeasure(String measureKind) {
         return MEASURE_SPEED.equals(measureKind) || MEASURE_DURATION.equals(measureKind);
@@ -309,6 +358,48 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
             return rawValue.multiply(SPEED_FACTOR).setScale(REGISTER_SCALE, SHARED_ROUNDING);
         }
         return rawValue.divide(MINUTES_PER_HOUR, REGISTER_SCALE, SHARED_ROUNDING);
+    }
+
+    /** 车上报数的量程：按车上端口径把门关住，越界的数判出档位（负值也在此挡住） */
+    private boolean inRawRange(String measureKind, BigDecimal rawValue) {
+        if (rawValue.compareTo(BigDecimal.ZERO) < 0) {
+            return false;
+        }
+        BigDecimal max = MEASURE_SPEED.equals(measureKind) ? SPEED_RAW_MAX : DURATION_RAW_MAX;
+        return rawValue.compareTo(max) <= 0;
+    }
+
+    /** 旧路收的已是界册单位，量程门按界册这一头同一把刻度比 */
+    private boolean inRegisterRange(String measureKind, BigDecimal registerValue) {
+        if (registerValue.compareTo(BigDecimal.ZERO) < 0) {
+            return false;
+        }
+        if (MEASURE_SPEED.equals(measureKind)) {
+            return registerValue.compareTo(SPEED_RAW_MAX.multiply(SPEED_FACTOR)) <= 0;
+        }
+        if (MEASURE_DURATION.equals(measureKind)) {
+            return registerValue.compareTo(DURATION_RAW_MAX.divide(MINUTES_PER_HOUR,
+                    REGISTER_SCALE, RoundingMode.CEILING)) <= 0;
+        }
+        // 类别念不出的界，量程门不替它担保
+        return false;
+    }
+
+    /**
+     * 三层归层只有一套说法，新旧两路共用：
+     * [起算,够线)提示、[够线,封顶)严管、[封顶及以上)立案；没够着起算返回 null（不给层）。
+     */
+    private Integer grade(TVehRunLine r, BigDecimal registerValue) {
+        if (registerValue.compareTo(r.getTh1Max()) < 0) {
+            return null;
+        }
+        if (registerValue.compareTo(r.getTh2Max()) < 0) {
+            return Integer.valueOf(LEVEL_TIP);
+        }
+        if (registerValue.compareTo(r.getTh3Max()) < 0) {
+            return Integer.valueOf(LEVEL_STRICT);
+        }
+        return Integer.valueOf(LEVEL_CASE);
     }
 
     /**
@@ -331,20 +422,43 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
             if (del != null && del != 0) {
                 continue;
             }
-            if (measureKind != null && !measureKind.equals(r.getMeasureKind())) {
-                continue;
-            }
-            if (r.getStatus() != null && r.getStatus() == 1) {
-                continue;
-            }
-            if (thresholdDefect(r) != null) {
-                continue;
-            }
-            if (inOffice(r, at)) {
+            if (isEffective(r, measureKind, at)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * 判完即归档在册：说话的那条界连同分界数、起用日、交班次序照裁决那一刻快照下来，
+     * 日后界册改了、界交班了，追溯只以这一份为准，不许拿最新版阈值把旧账重算成另一个档。
+     * 无可用界/未到起算/超量程的也归档，代号与分界数各栏留空。
+     */
+    private void archive(String measureKind, BigDecimal rawValue, BigDecimal converted, Date at,
+                         TVehRunLine speaker, RunLineVerdict result) {
+        if (this.verdictRecordMapper == null) {
+            return;
+        }
+        TVehRunLineVerdictRecord rec = new TVehRunLineVerdictRecord();
+        rec.setMeasureKind(measureKind);
+        rec.setRawValue(rawValue);
+        rec.setConvertedValue(converted);
+        rec.setAskAt(at);
+        rec.setLevel(result.getLevel());
+        rec.setLevelText(result.getLevelText());
+        rec.setArchivedAt(new Date());
+        rec.setDelFlag(0);
+        if (speaker != null) {
+            rec.setRuleCode(speaker.getRuleCode());
+            rec.setRuleName(speaker.getRuleName());
+            rec.setEffStart(speaker.getEffStart());
+            rec.setTh1Max(speaker.getTh1Max());
+            rec.setTh2Max(speaker.getTh2Max());
+            rec.setTh3Max(speaker.getTh3Max());
+            rec.setUnitKind(speaker.getUnitKind());
+            rec.setPriority(speaker.getPriority());
+        }
+        this.verdictRecordMapper.insert(rec);
     }
 
     /** 把"为什么请不出在位界"逐条落成一句句人话，便于屏上一条条指出 */

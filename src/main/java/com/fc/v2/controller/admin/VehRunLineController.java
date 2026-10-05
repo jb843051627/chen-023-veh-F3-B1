@@ -11,6 +11,7 @@ import com.fc.v2.common.base.BaseController;
 import com.fc.v2.common.domain.AjaxResult;
 import com.fc.v2.common.log.Log;
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunLineVerdictRecord;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 import com.fc.v2.service.ITVehRunLineService;
@@ -149,6 +150,31 @@ public class VehRunLineController extends BaseController {
         return dangling.isEmpty()
                 ? AjaxResult.success("屏上挂的代号那一刻都请得出在位界")
                 : AjaxResult.success(200, "悬空" + dangling.size() + "条，当场指出", dangling);
+    }
+
+    @Log(title = "裁决留痕在册", action = "archive")
+    @ApiOperation(value = "裁决归档翻阅",
+            notes = "判完即归档在册的那一册：说话界与分界数照裁决那一刻快照，追溯只认这一份，"
+                    + "不许拿最新版阈值重算旧账。可按所量类别、问话时刻区间、界次代号翻")
+    @GetMapping("/archive")
+    @RequiresPermissions("veh:vehRunLine:browse")
+    @ResponseBody
+    public AjaxResult archive(String measureKind, String from, String to, String ruleCode) {
+        String measure = normalizeMeasure(measureKind);
+        if (measureKind != null && !measureKind.trim().isEmpty() && measure == null) {
+            return error("所量类别念得不对：只认 speed 与 duration");
+        }
+        Date fromAt = parseWallClock(from);
+        if (from != null && !from.trim().isEmpty() && fromAt == null) {
+            return error("起刻写法不对，认 " + FMT_TS + " 或 " + FMT_DAY);
+        }
+        Date toAt = parseWallClock(to);
+        if (to != null && !to.trim().isEmpty() && toAt == null) {
+            return error("止刻写法不对，认 " + FMT_TS + " 或 " + FMT_DAY);
+        }
+        List<TVehRunLineVerdictRecord> records =
+                vehRunLineService.listVerdictArchive(measure, fromAt, toAt, ruleCode);
+        return AjaxResult.success(200, "裁决留痕在册" + records.size() + "条（追溯以此份为准）", records);
     }
 
     /** 所量类别只认两套说法，别的一概不接 */

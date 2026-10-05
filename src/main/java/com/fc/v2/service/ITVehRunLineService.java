@@ -6,6 +6,7 @@ import java.util.Date;
 import java.util.List;
 
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunLineVerdictRecord;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 
@@ -36,6 +37,8 @@ public interface ITVehRunLineService {
     String TEXT_NO_RULE = "无可用界";
     /** 结论栏：在位界请得出，但报来的数还没到起算 */
     String TEXT_BELOW_START = "未到起算";
+    /** 结论栏：报来的数越出量程（探头念飞了），判出档位，不许塞进档里充数 */
+    String TEXT_OUT_OF_RANGE = "超出量程";
 
     /** 所量类别：车速（车上报每秒多少米，界册记每小时多少公里） */
     String MEASURE_SPEED = "speed";
@@ -48,29 +51,32 @@ public interface ITVehRunLineService {
     TVehRunLine selectTVehRunLineById(Long id);
 
     /**
-     * 【旧办法】单规则求值：按 ruleCode 取界判档（1..4）。
-     * 凭界次代号取值的旧走法，照原样摆着，不挂新参数、不接新口径。
-     * 无生效版本 / 输入越界 / 参数缺失一律返回 0。
+     * 【旧办法】单规则求值：按 ruleCode 取界判档（1..3，没够着起算/越界/无在位界返 0）。
+     * 名目、参数表照旧（输入按界册单位直收、不折算），但请界、在位、量程、压线归层
+     * 已并到新走法 {@link #verdict} 同一套口径：已停用/已交班/未起用/分界数站不住的请不出，
+     * 等号压在哪一格就归哪一格，不许与新走法各说各话。
      */
     int evaluate(String ruleCode, BigDecimal input, Date at);
 
     /**
-     * 【旧办法】多规则求值（旧口径）。无可用规则返回 0。
+     * 【旧办法】多规则求值。请界与排序同新走法一处（说话序取头一条），
+     * 越界值判出档位返 0；无在位界返 0。
      */
     int evaluateTop(BigDecimal input, Date at);
 
     /**
-     * 【旧办法】在册界清单（旧口径：只排除留痕删除，不做生效窗口）。
+     * 【旧办法】在位界清单。口径已并到新走法同一处：只排未停用、未交班、未起用之外、
+     * 分界数站得住且在生效窗口内的界（旧"只排除留痕删除"那套作废，停用界不许混进来）。
      */
     List<TVehRunLine> listAvailable(Date at);
 
     /**
-     * 【旧办法】单条规则是否可用（旧口径）。
+     * 【旧办法】单条规则是否可用。与在位名单同一处筛选，两处对同一条的说法不许差开。
      */
     boolean usable(Long id, Date at);
 
     /**
-     * 【旧办法】在册界条数（旧口径）。
+     * 【旧办法】在位界条数。即 {@link #listAvailable(Date)} 的条数，同一本账。
      */
     int countAvailable(Date at);
 
@@ -120,4 +126,11 @@ public interface ITVehRunLineService {
      * measureKind 传 null 时不分类别点（跨线核对用）。
      */
     List<RunLineDefect> danglingScreenCodes(String measureKind, Collection<String> screenCodes, Date at);
+
+    /**
+     * 【新·归档在册】翻裁决留痕：判完即归档的那一册，追溯只认这里面的快照，
+     * 不许拿最新版界册把旧账重算成另一个档。可按所量类别、问话时刻区间、界次代号翻；
+     * 各条件传 null 即不限。按问话时刻倒序（最近判的在册首）。
+     */
+    List<TVehRunLineVerdictRecord> listVerdictArchive(String measureKind, Date from, Date to, String ruleCode);
 }
