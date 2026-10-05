@@ -150,6 +150,26 @@ CREATE TABLE IF NOT EXISTS t_veh_run_line (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运行界次判定线';
 
+-- 界次归层归档：每一次裁决判完即落这一册，日后追溯以这一份为准，只翻档不重算。
+CREATE TABLE IF NOT EXISTS t_veh_run_verdict (
+  id bigint NOT NULL COMMENT '主键',
+  measure_kind varchar(32) DEFAULT NULL COMMENT '所量类别（speed 车速 / duration 连续驾驶时长）',
+  raw_value decimal(12,3) DEFAULT NULL COMMENT '车上报回来的数（车上端口径：车速 m/s、时长分钟）',
+  converted decimal(12,3) DEFAULT NULL COMMENT '折到界册那一头之后的数（取数与比数同一把舍法）',
+  level_text varchar(32) DEFAULT NULL COMMENT '结论栏（提示/严管/立案/未到起算/无可用界）',
+  level int DEFAULT NULL COMMENT '层序 1提示 2严管 3立案；无层为空',
+  rule_code varchar(64) DEFAULT NULL COMMENT '说话的那一条界次代号；无可用界留空',
+  eff_start datetime DEFAULT NULL COMMENT '说话界起用那一日；无可用界留空',
+  asked_at datetime DEFAULT NULL COMMENT '问话的那一刻（补判旧账就是旧账自己的那一刻）',
+  create_by varchar(64) DEFAULT NULL COMMENT '创建者',
+  create_time datetime DEFAULT NULL COMMENT '创建时间（落册那一刻）',
+  update_by varchar(64) DEFAULT NULL COMMENT '更新者',
+  update_time datetime DEFAULT NULL COMMENT '更新时间',
+  remark varchar(500) DEFAULT NULL COMMENT '备注',
+  PRIMARY KEY (id),
+  KEY idx_veh_verdict_asked (measure_kind, asked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运行界次归层归档';
+
 -- 初始档案数据：t_veh_ent 预置两条名录，id=0 在册、id=1 已销户，
 -- 供界次判定与联网清单挂接时按在册口径取用。
 INSERT IGNORE INTO t_veh_ent (id, site_no, site_name, site_type, road_name, status, del_flag, create_by, create_time)

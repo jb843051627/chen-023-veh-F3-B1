@@ -1,10 +1,13 @@
 package com.fc.v2.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -16,12 +19,15 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.fc.v2.mapper.auto.TVehRunLineMapper;
+import com.fc.v2.mapper.auto.TVehRunVerdictMapper;
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunVerdict;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 import com.fc.v2.service.impl.TVehRunLineServiceImpl;
@@ -30,13 +36,17 @@ import com.fc.v2.service.impl.TVehRunLineServiceImpl;
  * 界次归层口径测试（不启 Spring，桩掉数据层）。
  * 把需求里点过名的坑一个个钉住：折算方向、同一把舍法、压线一套说法、
  * 历史时刻不许新界顶替、交班次序/界次代序、无可用界两栏留空、停用不参与、
- * 存量空交班、分界数缺格/错序指名、屏挂悬空代号指出。
+ * 存量空交班、分界数缺格/错序指名、屏挂悬空代号指出、量程越界不判档、
+ * 判完即归档、旧名目与新走法同一把尺。
  */
 @ExtendWith(MockitoExtension.class)
 public class TVehRunLineServiceImplTest {
 
     @Mock
     private TVehRunLineMapper vehRunLineMapper;
+
+    @Mock
+    private TVehRunVerdictMapper vehRunVerdictMapper;
 
     @InjectMocks
     private TVehRunLineServiceImpl service;
@@ -356,5 +366,166 @@ public class TVehRunLineServiceImplTest {
         assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, null, day("2026-10-04")));
         assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("25"), null));
         assertNull(service.verdict("bogus", new BigDecimal("25"), day("2026-10-04")));
+    }
+
+    // ---- 五、量程校验只此一处：越界的数不判档 ----
+
+    @Test
+    public void outOfMeasureRangeYieldsNullVerdict() {
+        stubRegister(rule("S1", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 0));
+        // 负数、车速过 70 m/s、时长过 1440 分钟：越出量程不判档，与缺参同一路回绝
+        assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("-0.1"),
+                day("2026-10-04")));
+        assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("70.001"),
+                day("2026-10-04")));
+        assertNull(service.verdict(ITVehRunLineService.MEASURE_DURATION, new BigDecimal("1441"),
+                day("2026-10-04")));
+        // 贴着量程顶的照样判：70 m/s = 252.000 km/h → 立案
+        RunLineVerdict atCap = service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("70"),
+                day("2026-10-04"));
+        assertEquals("立案", atCap.getLevelText());
+    }
+
+    // ---- 六、判完即归档在册：日后追溯以这一份为准 ----
+
+    @Test
+    public void verdictIsArchivedAsJudged() {
+        stubRegister(rule("S1", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 0));
+        Date moment = day("2026-10-04 09:30:00");
+        RunLineVerdict v = service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("25"),
+                moment);
+        assertEquals("提示", v.getLevelText());
+        ArgumentCaptor<TVehRunVerdict> cap = ArgumentCaptor.forClass(TVehRunVerdict.class);
+        verify(vehRunVerdictMapper).insert(cap.capture());
+        TVehRunVerdict row = cap.getValue();
+        assertEquals(ITVehRunLineService.MEASURE_SPEED, row.getMeasureKind());
+        assertEquals(0, new BigDecimal("25").compareTo(row.getRawValue()));
+        assertEquals(0, new BigDecimal("90.000").compareTo(row.getConverted()));
+        assertEquals("提示", row.getLevelText());
+        assertEquals(1, row.getLevel().intValue());
+        assertEquals("S1", row.getRuleCode());
+        assertEquals(moment, row.getAskedAt());
+        assertNotNull(row.getEffStart());
+    }
+
+    @Test
+    public void noRuleVerdictIsArchivedWithBlankRuleColumns() {
+        stubRegister(rule("OFF", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 1));
+        service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("25"), day("2026-10-04"));
+        ArgumentCaptor<TVehRunVerdict> cap = ArgumentCaptor.forClass(TVehRunVerdict.class);
+        verify(vehRunVerdictMapper).insert(cap.capture());
+        // 无可用界也照落册：结论"无可用界"，代号与起用日两栏留空
+        assertEquals(ITVehRunLineService.TEXT_NO_RULE, cap.getValue().getLevelText());
+        assertNull(cap.getValue().getRuleCode());
+        assertNull(cap.getValue().getEffStart());
+    }
+
+    @Test
+    public void rejectedVerdictIsNotArchived() {
+        // 缺参、越出量程：没判成就没有归档，不许落一份空结论
+        assertNull(service.verdict(ITVehRunLineService.MEASURE_SPEED, new BigDecimal("-1"),
+                day("2026-10-04")));
+        assertNull(service.verdict(null, new BigDecimal("25"), day("2026-10-04")));
+        verify(vehRunVerdictMapper, never()).insert(any());
+    }
+
+    // ---- 七、旧名目与新走法同一把尺（签名不动的老名目，内里不再另摆口径） ----
+
+    @Test
+    public void oldBoundarySameSideAsNewCaliber() {
+        // 等号不分两家：老名目压线同样归高一档（老档序 1..4 对应 未到起算/提示/严管/立案）
+        stubRegister(rule("S1", ITVehRunLineService.MEASURE_SPEED, "30", "60", "90",
+                "2020-01-01", null, 0, 0));
+        assertEquals(1, service.evaluate("S1", new BigDecimal("29.999"), day("2026-10-04")));
+        assertEquals(2, service.evaluate("S1", new BigDecimal("30"), day("2026-10-04")));
+        assertEquals(3, service.evaluate("S1", new BigDecimal("60"), day("2026-10-04")));
+        assertEquals(4, service.evaluate("S1", new BigDecimal("90"), day("2026-10-04")));
+    }
+
+    @Test
+    public void oldEvaluateUsesHistoricalRuleNotNewest() {
+        // 同一代号两版界：历史时点重算用历史界，不许拿最新版顶替（报表与归档才对得齐）
+        stubRegister(
+                rule("S1", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                        "2024-01-01", "2025-01-01", 0, 0),
+                rule("S1", ITVehRunLineService.MEASURE_SPEED, "10", "20", "30",
+                        "2026-01-01", null, 0, 0));
+        // 2024 年秋问 90：旧版界说话 → [60,100) 档 2
+        assertEquals(2, service.evaluate("S1", new BigDecimal("90"), day("2024-09-15")));
+        // 2026 年问 90：新版界说话 → ≥30 档 4
+        assertEquals(4, service.evaluate("S1", new BigDecimal("90"), day("2026-10-04")));
+    }
+
+    @Test
+    public void oldPathsExcludeDisabledAndDefective() {
+        // 停用项混不进可用判据：老名目与新走法同一处筛选
+        TVehRunLine off = rule("OFF", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 1);
+        TVehRunLine bad = rule("BAD", ITVehRunLineService.MEASURE_SPEED, "60", "60", "120",
+                "2020-01-01", null, 0, 0);
+        stubRegister(off, bad);
+        assertEquals(0, service.listAvailable(day("2026-10-04")).size());
+        assertEquals(0, service.countAvailable(day("2026-10-04")));
+        assertEquals(0, service.evaluate("OFF", new BigDecimal("90"), day("2026-10-04")));
+        assertEquals(0, service.evaluate("BAD", new BigDecimal("90"), day("2026-10-04")));
+        assertEquals(0, service.evaluateTop(new BigDecimal("90"), day("2026-10-04")));
+    }
+
+    @Test
+    public void oldTopIsDeterministicAtSamePriority() {
+        // 同优先级有取舍规则：按界次代号末位，两次问同一个答复
+        stubRegister(
+                rule("R10", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                        "2020-01-01", null, 2, 0),
+                rule("R2", ITVehRunLineService.MEASURE_SPEED, "10", "20", "30",
+                        "2020-01-01", null, 2, 0));
+        assertEquals(4, service.evaluateTop(new BigDecimal("90"), day("2026-10-04")));
+        assertEquals(4, service.evaluateTop(new BigDecimal("90"), day("2026-10-04")));
+        assertEquals("R2", service.listAvailable(day("2026-10-04")).get(0).getRuleCode());
+    }
+
+    @Test
+    public void oldRangeCheckSharedByBothEntries() {
+        // 量程一处卡：evaluate 与 evaluateTop 同一把卡尺（老名目 0..100，界册那一头的数）
+        stubRegister(rule("S1", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 0));
+        assertEquals(0, service.evaluate("S1", new BigDecimal("-1"), day("2026-10-04")));
+        assertEquals(0, service.evaluate("S1", new BigDecimal("101"), day("2026-10-04")));
+        assertEquals(0, service.evaluateTop(new BigDecimal("-1"), day("2026-10-04")));
+        assertEquals(0, service.evaluateTop(new BigDecimal("101"), day("2026-10-04")));
+        // 贴着量程顶的照样判
+        assertEquals(3, service.evaluate("S1", new BigDecimal("100"), day("2026-10-04")));
+        assertEquals(3, service.evaluateTop(new BigDecimal("100"), day("2026-10-04")));
+    }
+
+    @Test
+    public void usableFollowsSameCaliberAsEffectiveList() {
+        TVehRunLine ok = rule("S1", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 0);
+        ok.setId(1L);
+        TVehRunLine off = rule("OFF", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2020-01-01", null, 0, 1);
+        off.setId(2L);
+        when(vehRunLineMapper.selectById(1L)).thenReturn(ok);
+        when(vehRunLineMapper.selectById(2L)).thenReturn(off);
+        assertTrue(service.usable(1L, day("2026-10-04")));
+        // 还没起用的那一刻请不出在位
+        assertFalse(service.usable(1L, day("2019-12-31")));
+        // 已停用的不可用
+        assertFalse(service.usable(2L, day("2026-10-04")));
+        assertFalse(service.usable(99L, day("2026-10-04")));
+        assertFalse(service.usable(null, day("2026-10-04")));
+    }
+
+    @Test
+    public void legacyBlankHandoverStaysInOfficeOnOldPathsToo() {
+        // 兼容存量两处一致：交班栏空着的存量界，老名目同样认作一直在位
+        stubRegister(rule("LEG", ITVehRunLineService.MEASURE_SPEED, "60", "100", "120",
+                "2000-01-01", null, 0, 0));
+        assertEquals(1, service.listAvailable(day("2026-10-04")).size());
+        assertEquals(2, service.evaluate("LEG", new BigDecimal("90"), day("2026-10-04")));
     }
 }

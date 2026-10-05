@@ -6,6 +6,7 @@ import java.util.Date;
 import java.util.List;
 
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunVerdict;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 
@@ -16,9 +17,12 @@ import com.fc.v2.model.custom.RunLineVerdict;
  * 报来的数折不折算往哪头折）只由本服务 {@link #verdict} 一处作答；
  * 屏上不得另辟第二个能出这个结果的入口。
  *
- * 旧办法（凭界次代号取值的 evaluate / evaluateTop）照原样摆着，不往它身上挂新参数；
- * 这一回的新走法一律另起名目（verdict / listEffective / browseRegister / inspectRegister /
- * danglingScreenCodes）。
+ * 旧名目（evaluate / evaluateTop / listAvailable / usable / countAvailable）留着给老调用方，
+ * 签名一个不动；内里与新走法同一把尺——压线归高一档、那一刻在位、停用不参与、
+ * 次序相同按说话次序、量程越界回兜底——新老两处一个答复，不再各说各的。
+ *
+ * 每一次裁决判完即归档在册（t_veh_run_verdict），日后追溯以归档这一份为准（
+ * {@link #listVerdictArchive} 只翻档不重算）。
  *
  * @author fuce
  * @date 2026-09-14
@@ -43,34 +47,39 @@ public interface ITVehRunLineService {
     String MEASURE_DURATION = "duration";
 
     /**
-     * 按主键查询规则（旧办法，原样保留）。
+     * 按主键查询规则（旧名目，原样保留）。
      */
     TVehRunLine selectTVehRunLineById(Long id);
 
     /**
-     * 【旧办法】单规则求值：按 ruleCode 取界判档（1..4）。
-     * 凭界次代号取值的旧走法，照原样摆着，不挂新参数、不接新口径。
-     * 无生效版本 / 输入越界 / 参数缺失一律返回 0。
+     * 【旧名目】单规则求值：按 ruleCode 取那一刻的在位界判档（1..4）。
+     * 签名不动的老名目，内里与新走法同一把尺：历史时点用历史界（不许最新版顶替）、
+     * 停用与站不住的界不参与、压线归高一档、量程（0..100，界册那一头的数）越界回 0。
+     * 无在位版本 / 输入越界 / 参数缺失一律返回 0（兜底值，不抛异常）。
      */
     int evaluate(String ruleCode, BigDecimal input, Date at);
 
     /**
-     * 【旧办法】多规则求值（旧口径）。无可用规则返回 0。
+     * 【旧名目】多规则求值：取那一刻说话的那条界判档（1..4）。
+     * 名单与 {@link #listAvailable} 同源、同一把说话次序，同一刻问两遍同一个答复。
+     * 无可用规则 / 输入越界 / 参数缺失返回 0。
      */
     int evaluateTop(BigDecimal input, Date at);
 
     /**
-     * 【旧办法】在册界清单（旧口径：只排除留痕删除，不做生效窗口）。
+     * 【旧名目】在册界清单：与新走法同一处筛选（未停用、分界数站得住、那一刻在位）、
+     * 同一把说话次序；老名目不分所量类别，两条线的界都在单上。
      */
     List<TVehRunLine> listAvailable(Date at);
 
     /**
-     * 【旧办法】单条规则是否可用（旧口径）。
+     * 【旧名目】单条规则那一刻可用不可用以否：在册、未停用、站得住、那一刻在位，
+     * 口径与新走法同出一处。
      */
     boolean usable(Long id, Date at);
 
     /**
-     * 【旧办法】在册界条数（旧口径）。
+     * 【旧名目】在册界条数：与 {@link #listAvailable} 同源，不另点一本账。
      */
     int countAvailable(Date at);
 
@@ -87,12 +96,24 @@ public interface ITVehRunLineService {
      * 4. 归层：三层只有一套说法，压线归本层——[起算,够线)提示、[够线,封顶)严管、[封顶及以上)立案；
      *    四条界一条都够不上时不给层，结论写"无可用界"，界次代号与起用那一日两栏一并留空。
      *
+     * 量程校验只此一处：负数一律越界，车速过 70 m/s、时长过 1440 分钟视为采坏，
+     * 越界的数不判档，与缺参同一路回绝（返回 null）。
+     *
+     * 每一次裁决判完即归档在册（t_veh_run_verdict），日后追溯以归档这一份为准。
+     *
      * @param measureKind 所量类别（speed 车速 / duration 连续驾驶时长）
      * @param rawValue    车上报回来的数（车速 m/s、时长分钟）
      * @param at          问话的那一刻（补判旧账就传旧账自己的那一刻，不许拿新界顶替）
-     * @return 归层结论；measureKind/rawValue/at 缺一返回 null（由调用方按缺参回绝）
+     * @return 归层结论；measureKind/rawValue/at 缺一或越出量程返回 null（由调用方按缺参回绝）
      */
     RunLineVerdict verdict(String measureKind, BigDecimal rawValue, Date at);
+
+    /**
+     * 【新·追溯只翻档】翻归层归档册：每一次裁决落的那一份，按问话那一刻倒序。
+     * 只翻档不重算——日后追溯以这一份为准，不许拿眼下最新界再判一遍顶替。
+     * measureKind 传 null 两类都翻；from/to 圈问话时段，可空。
+     */
+    List<TVehRunVerdict> listVerdictArchive(String measureKind, Date from, Date to);
 
     /**
      * 【新】把界册逐条走一遍，凑出那一刻、那一类别的在位界，按裁决序排好

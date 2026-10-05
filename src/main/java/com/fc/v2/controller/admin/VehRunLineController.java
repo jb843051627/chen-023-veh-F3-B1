@@ -11,6 +11,7 @@ import com.fc.v2.common.base.BaseController;
 import com.fc.v2.common.domain.AjaxResult;
 import com.fc.v2.common.log.Log;
 import com.fc.v2.model.auto.TVehRunLine;
+import com.fc.v2.model.auto.TVehRunVerdict;
 import com.fc.v2.model.custom.RunLineDefect;
 import com.fc.v2.model.custom.RunLineVerdict;
 import com.fc.v2.service.ITVehRunLineService;
@@ -50,7 +51,8 @@ public class VehRunLineController extends BaseController {
     @Log(title = "界次归层裁决", action = "verdict")
     @ApiOperation(value = "界次归层（唯一裁决口）",
             notes = "报来的数按车上端口径给（车速 m/s、时长分钟），由服务层折到界册那一头再归层；"
-                    + "一条界都够不上时结论写无可用界，界次代号与起用日两栏留空")
+                    + "一条界都够不上时结论写无可用界，界次代号与起用日两栏留空；"
+                    + "越出量程的数不判档；每一次裁决判完即归档在册")
     @GetMapping("/verdict")
     @RequiresPermissions("veh:vehRunLine:verdict")
     @ResponseBody
@@ -59,19 +61,43 @@ public class VehRunLineController extends BaseController {
         if (measure == null) {
             return error("所量类别念得不对：只认 speed（车速）与 duration（连续驾驶时长）");
         }
-        if (rawValue == null || rawValue.compareTo(BigDecimal.ZERO) < 0) {
-            return error("车上报回来的数缺失或小于零，没法取数");
+        if (rawValue == null) {
+            return error("车上报回来的数缺失，没法取数");
         }
         Date moment = parseWallClock(at);
         if (moment == null) {
             return error("问话的那一刻缺失或写法不对，认 " + FMT_TS + " 或 " + FMT_DAY);
         }
-        // 屏上只递话：折算、请界、说话、归层全在服务层一处，这里不许再算第二遍
+        // 屏上只递话：折算、量程、请界、说话、归层全在服务层一处，这里不许再算第二遍
         RunLineVerdict result = vehRunLineService.verdict(measure, rawValue, moment);
         if (result == null) {
-            return error("裁决参数不全，没得出结论");
+            return error("裁决参数不全或越出量程，没得出结论");
         }
         return AjaxResult.success(200, "裁决办结", result);
+    }
+
+    @Log(title = "归层归档追溯", action = "archive")
+    @ApiOperation(value = "归层归档追溯",
+            notes = "每一次裁决判完即落册，追溯只翻这一份，不拿眼下最新界重算顶替；"
+                    + "from/to 圈问话时段，可空")
+    @GetMapping("/archive")
+    @RequiresPermissions("veh:vehRunLine:archive")
+    @ResponseBody
+    public AjaxResult archive(String measureKind, String from, String to) {
+        String measure = normalizeMeasure(measureKind);
+        if (measureKind != null && !measureKind.trim().isEmpty() && measure == null) {
+            return error("所量类别念得不对：只认 speed 与 duration");
+        }
+        Date fromMoment = parseWallClock(from);
+        if (from != null && !from.trim().isEmpty() && fromMoment == null) {
+            return error("起点的写法不对，认 " + FMT_TS + " 或 " + FMT_DAY);
+        }
+        Date toMoment = parseWallClock(to);
+        if (to != null && !to.trim().isEmpty() && toMoment == null) {
+            return error("止点的写法不对，认 " + FMT_TS + " 或 " + FMT_DAY);
+        }
+        List<TVehRunVerdict> list = vehRunLineService.listVerdictArchive(measure, fromMoment, toMoment);
+        return AjaxResult.success(200, "归层归档" + list.size() + "份（只翻档不重算）", list);
     }
 
     @Log(title = "在位界名单", action = "available")
